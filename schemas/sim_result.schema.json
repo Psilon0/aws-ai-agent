@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "SimResult",
+  "type": "object",
+  "required": ["proposed_allocation", "kpis"],
+  "properties": {
+    "proposed_allocation": {
+      "type": "object",
+      "required": ["equities", "bonds", "cash"],
+      "properties": {
+        "equities": { "type": "number", "minimum": 0, "maximum": 1 },
+        "bonds":    { "type": "number", "minimum": 0, "maximum": 1 },
+        "cash":     { "type": "number", "minimum": 0, "maximum": 1 }
+      },
+      "additionalProperties": false
+    },
+    "kpis": {
+      "type": "object",
+      "required": ["exp_return_1y", "exp_vol_1y", "max_drawdown"],
+      "properties": {
+        "exp_return_1y": { "type": "number" },
+        "exp_vol_1y":    { "type": "number" },
+        "max_drawdown":  { "type": "number" }
+      },
+      "additionalProperties": true
+    },
+    "meta": { "type": "object", "additionalProperties": true }
+  },
+  "additionalProperties": false
+}

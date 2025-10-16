@@ -1,7 +1,6 @@
 from typing import Dict, Any, List
 import json, os
 import boto3
-from src.pipeline import run_pipeline
 from .agent_io import validate_agent_output
 
 REGION = os.getenv("AWS_REGION", "eu-west-2")
@@ -17,9 +16,6 @@ class Agent:
         self.model_id = model_id
 
     def handle(self, payload: Dict[str, Any]) -> Dict[str, Any]:
-        text = (payload.get('message') or {}).get('text','').lower()
-        if any(k in text for k in ['portfolio','allocation','rebalance']):
-            return run_pipeline(payload)
         plan = self._plan(payload)
         if plan.get("tool_call"):
             return {

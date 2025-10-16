@@ -1,0 +1,12 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "SimRequest",
+  "type": "object",
+  "required": ["risk_profile", "horizon_years"],
+  "properties": {
+    "risk_profile": { "type": "string", "enum": ["conservative", "balanced", "aggressive"] },
+    "horizon_years": { "type": "integer", "minimum": 1, "maximum": 50 },
+    "notes": { "type": "string" }
+  },
+  "additionalProperties": true
+}
