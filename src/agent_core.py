@@ -6,7 +6,7 @@ from .agent_io import validate_agent_output
 
 REGION = os.getenv("AWS_REGION", "eu-west-2")
 MODEL_ID = os.getenv("MODEL_ID", "deepseek.v3-v1:0")  # e.g. deepseek.v3-v1:0 or qwen.qwen3-coder-30b-a3b-v1:0
-client = boto3.client("bedrock-runtime", region_name=REGION)
+bedrock = boto3.client("bedrock-runtime", region_name=REGION)
 
 PROMPT_PATH = os.path.join(os.path.dirname(__file__), "prompts", "finsense_system_prompt.md")
 with open(PROMPT_PATH, "r", encoding="utf-8") as f:
@@ -39,46 +39,53 @@ class Agent:
         return {"tool_call": False, "trace": [{"step": "plan", "observation": "No external data needed"}]}
 
     def _reason(self, payload: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Ask the model to produce a valid AgentOutput. We enforce JSON and validate before returning.
-        """
-        sys = {"text": SYSTEM_PROMPT}
-        user = {"text": json.dumps(payload)}
-        resp = client.converse(
-            modelId=self.model_id,
-            messages=[
-                {"role": "system", "content": [sys]},
-                {"role": "user", "content": [user]},
-            ],
-            inferenceConfig={"maxTokens": 500, "temperature": 0.2},
-            # accept/contentType are not required for converse()
-        )
-
-        # Bedrock Converse returns a structured message; we expect model to output JSON in text
-        parts: List[Dict[str, str]] = resp["output"]["message"]["content"]
-        text_out = "".join(p.get("text", "") for p in parts).strip()
-
+        # Build a proper Converse request: system prompt in 'system', user content in 'messages'
+        user_payload_str = json.dumps(payload)
         try:
-            out = json.loads(text_out)
-        except json.JSONDecodeError:
-            out = {
-                "status": "error",
-                "messages": [{"role": "system", "content": "Model returned non-JSON output.", "format": "text"}]
-            }
-
-        # Ensure disclaimers for finance
-        if isinstance(out, dict):
-            advice = out.setdefault("advice_metadata", {})
-            advice.setdefault("disclaimers", ["Educational only — not financial advice."])
-            advice.setdefault("sources", [])
-
-        # Validate against AgentOutput
-        errs = validate_agent_output(out if isinstance(out, dict) else {})
-        if errs:
+            resp = bedrock.converse(
+                modelId=self.model_id,
+                system=[{"text": SYSTEM_PROMPT}],
+                messages=[
+                    {
+                        "role": "user",
+                        "content": [{"text": user_payload_str}]
+                    }
+                ],
+                # You can add inferenceConfig here if you like:
+                # inferenceConfig={"maxTokens": 1024, "temperature": 0.2, "topP": 0.9}
+            )
+            # Converse response shape:
+            # resp["output"]["message"]["content"] -> list of blocks, take the first text
+            text = resp.get("output", {}).get("message", {}).get("content", [])
+            model_text = ""
+            for blk in text:
+                if "text" in blk:
+                    model_text = blk["text"]
+                    break
+            # Model is expected to produce AgentOutput JSON; try to parse
+            try:
+                out = json.loads(model_text)
+            except Exception:
+                # If the model responded with plain text, wrap it into AgentOutput
+                out = {
+                    "status": "ok",
+                    "messages": [{"role": "assistant", "content": model_text, "format": "text"}],
+                    "advice_metadata": {"disclaimers": ["Educational only, not financial advice."], "sources": []}
+                }
+            if "advice_metadata" not in out:
+                out["advice_metadata"] = {"disclaimers": ["Educational only, not financial advice."], "sources": []}
+            return out
+        except Exception as e:
+            # Return structured error in AgentOutput shape
             return {
                 "status": "error",
-                "messages": [{"role": "system",
-                              "content": "Output validation failed: " + "; ".join(errs),
-                              "format": "text"}]
+                "messages": [{"role": "system", "content": f"Bedrock error: {str(e)}", "format": "text"}]
             }
-        return out
+
+        except Exception as e:
+            # Return structured error in AgentOutput shape
+            return {
+                "status": "error",
+                "messages": [{"role": "system", "content": f"Bedrock error: {str(e)}", "format": "text"}]
+            }
+

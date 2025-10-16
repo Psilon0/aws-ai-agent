@@ -1,0 +1,84 @@
+from typing import Dict, Any, List
+import json, os
+import boto3
+from src.pipeline import run_pipeline
+from .agent_io import validate_agent_output
+
+REGION = os.getenv("AWS_REGION", "eu-west-2")
+MODEL_ID = os.getenv("MODEL_ID", "deepseek.v3-v1:0")  # e.g. deepseek.v3-v1:0 or qwen.qwen3-coder-30b-a3b-v1:0
+client = boto3.client("bedrock-runtime", region_name=REGION)
+
+PROMPT_PATH = os.path.join(os.path.dirname(__file__), "prompts", "finsense_system_prompt.md")
+with open(PROMPT_PATH, "r", encoding="utf-8") as f:
+    SYSTEM_PROMPT = f.read()
+
+class Agent:
+    def __init__(self, model_id: str = MODEL_ID):
+        self.model_id = model_id
+
+    def handle(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        text = (payload.get('message') or {}).get('text','').lower()
+        if any(k in text for k in ['portfolio','allocation','rebalance']):
+            return run_pipeline(payload)
+        plan = self._plan(payload)
+        if plan.get("tool_call"):
+            return {
+                "status": "tool_call",
+                "messages": [{"role": "system", "content": f"Calling tool '{plan['tool']['name']}'", "format": "text"}],
+                "tool": plan["tool"],
+                "trace": plan.get("trace", [])
+            }
+        return self._reason(payload)
+
+    def _plan(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        text = (payload.get("message") or {}).get("text", "").lower()
+        if any(k in text for k in ["http", "fetch", "latest", "price", "news", "market"]):
+            return {"tool_call": True,
+                    "tool": {"name": "http_fetch", "args": {"url": "https://example.com"}},
+                    "trace": [{"step": "plan", "observation": "Needs external data"}]}
+        return {"tool_call": False, "trace": [{"step": "plan", "observation": "No external data needed"}]}
+
+    def _reason(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Ask the model to produce a valid AgentOutput. We enforce JSON and validate before returning.
+        """
+        sys = {"text": SYSTEM_PROMPT}
+        user = {"text": json.dumps(payload)}
+        resp = client.converse(
+            modelId=self.model_id,
+            messages=[
+                {"role": "system", "content": [sys]},
+                {"role": "user", "content": [user]},
+            ],
+            inferenceConfig={"maxTokens": 500, "temperature": 0.2},
+            # accept/contentType are not required for converse()
+        )
+
+        # Bedrock Converse returns a structured message; we expect model to output JSON in text
+        parts: List[Dict[str, str]] = resp["output"]["message"]["content"]
+        text_out = "".join(p.get("text", "") for p in parts).strip()
+
+        try:
+            out = json.loads(text_out)
+        except json.JSONDecodeError:
+            out = {
+                "status": "error",
+                "messages": [{"role": "system", "content": "Model returned non-JSON output.", "format": "text"}]
+            }
+
+        # Ensure disclaimers for finance
+        if isinstance(out, dict):
+            advice = out.setdefault("advice_metadata", {})
+            advice.setdefault("disclaimers", ["Educational only — not financial advice."])
+            advice.setdefault("sources", [])
+
+        # Validate against AgentOutput
+        errs = validate_agent_output(out if isinstance(out, dict) else {})
+        if errs:
+            return {
+                "status": "error",
+                "messages": [{"role": "system",
+                              "content": "Output validation failed: " + "; ".join(errs),
+                              "format": "text"}]
+            }
+        return out
