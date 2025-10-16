@@ -16,7 +16,7 @@ run-cli:
 	python -m scripts.chat_cli
 
 run-ui:
-	streamlit run apps/chat_ui_streamlit.py
+	PYTHONPATH=. streamlit run apps/chat_ui_streamlit.py
 
 run-allocation-chat:
 	PYTHONPATH=. python scripts/run_allocation_chat.py
