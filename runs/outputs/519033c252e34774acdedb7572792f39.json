@@ -1,0 +1,38 @@
+{
+  "version": "0.1.0",
+  "run_id": "519033c252e34774acdedb7572792f39",
+  "latency_ms": 1,
+  "advice": {
+    "summary": "Given neutral sentiment (0.55) and your conservative risk band, the portfolio holds 32.5% equities to balance return vs. risk.",
+    "one_action": "Rebalance to target mix and set a 12-month check-in.",
+    "disclaimer": "Educational only, not financial advice."
+  },
+  "allocation": {
+    "equities": 0.325,
+    "bonds": 0.472,
+    "cash": 0.203
+  },
+  "allocation_meta": {
+    "band": {
+      "min_eq": 0.2,
+      "max_eq": 0.45
+    }
+  },
+  "kpis": {
+    "exp_return_1y": 0.0377,
+    "exp_vol_1y": 0.0868,
+    "max_drawdown": -0.0695
+  },
+  "sentiment": {
+    "label": "neutral",
+    "confidence": 0.55,
+    "asof_iso": "2025-10-17T16:06:50+01:00"
+  },
+  "risk_alerts": [],
+  "advanced_payload": {
+    "seed": null,
+    "defaults_used": true,
+    "prompt_sha256": "b7a0d9205658bb698a0be5168aced66277de5c16d6ec5c822df078734988e0c5",
+    "llm_timed_out": false
+  }
+}

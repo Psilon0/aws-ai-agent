@@ -1,0 +1,143 @@
+import re
+from typing import Dict, Any, List, Optional
+import requests
+import streamlit as st
+import matplotlib.pyplot as plt
+
+st.set_page_config(page_title="Portfolio Recommendation Agent", layout="centered")
+
+# =========================
+# Sidebar Configuration
+# =========================
+st.sidebar.header("Configuration")
+if "age_sb" not in st.session_state:
+    st.session_state.age_sb = 25
+if "risk_sb" not in st.session_state:
+    st.session_state.risk_sb = "moderate"
+if "horizon_sb" not in st.session_state:
+    st.session_state.horizon_sb = 5
+
+api_base = st.sidebar.text_input("API Base URL", "http://127.0.0.1:8000")
+st.sidebar.number_input("Age", min_value=16, max_value=100, value=st.session_state.age_sb, step=1, key="age_sb")
+st.sidebar.selectbox(
+    "Risk Profile",
+    ["conservative", "moderate", "aggressive"],
+    index=["conservative", "moderate", "aggressive"].index(st.session_state.risk_sb),
+    key="risk_sb",
+)
+st.sidebar.number_input("Horizon (years)", min_value=1, max_value=40, value=st.session_state.horizon_sb, step=1, key="horizon_sb")
+demo_seed = st.sidebar.text_input("Demo Seed (optional)", "")
+force_high_vol = st.sidebar.checkbox("Force high volatility (demo)", False)
+use_sidebar = st.sidebar.checkbox("Use sidebar as override", False)
+reset = st.sidebar.button("New session")
+
+# =========================
+# Session State Setup
+# =========================
+if reset or "messages" not in st.session_state:
+    st.session_state.messages: List[Dict[str, str]] = []
+    st.session_state.messages.append({"role": "assistant", "content": "How can I help? Try: “I am 25, moderate risk, 5-year horizon.”"})
+
+if "amount_gbp_override" not in st.session_state:
+    st.session_state.amount_gbp_override: Optional[float] = None
+if "percent_intent" not in st.session_state:
+    st.session_state.percent_intent: Optional[float] = None
+
+# =========================
+# Helper: Parse Chat Overrides
+# =========================
+def parse_overrides(text: str) -> dict:
+    text_l = text.lower()
+    out: Dict[str, Any] = {}
+
+    # Age
+    m_age = re.search(r"(?:^|\D)(1[6-9]|[2-9]\d|100)\s*year(?:s)?\s*old\b", text_l)
+    if m_age:
+        out["age"] = int(m_age.group(1))
+
+    # Risk
+    if re.search(r"\b(high\s*risk|aggressive|growthy|risk[-\s]*seeking)\b", text_l):
+        out["risk"] = "aggressive"
+    elif re.search(r"\b(moderate|balanced)\b", text_l):
+        out["risk"] = "moderate"
+    elif re.search(r"\b(low\s*risk|conservative|defensive|safe)\b", text_l):
+        out["risk"] = "conservative"
+
+    # Horizon
+    m_h = re.search(r"\b(1|[2-3]?\d)\s*(?:y|yr|yrs|year|years)\b", text_l)
+    if m_h:
+        out["horizon_years"] = int(m_h.group(1))
+
+    # Amount (GBP)
+    text_norm = text_l.replace(",", "")
+    m_amt = re.search(r"£\s*([0-9]+(?:\.[0-9]{1,2})?)", text_norm) or re.search(r"([0-9]+(?:\.[0-9]{1,2})?)\s*(pounds|gbp)\b", text_norm)
+    if not m_amt:
+        m_amt = re.search(r"\binvest\s+([0-9]+(?:\.[0-9]{1,2})?)\b", text_norm)
+    if m_amt:
+        try:
+        payload, data = call_api(prompt)
+    except requests.exceptions.RequestException as e:
+        msg = f"API request failed: {e}"
+        st.session_state.messages.append({"role": "assistant", "content": msg})
+        with st.chat_message("assistant"):
+            st.error(msg)
+    else:
+        advice = data.get("advice", {})
+        allocation = data.get("allocation", {})
+        kpis = data.get("kpis", {})
+        band = (data.get("allocation_meta") or {}).get("band", {})
+        alerts = data.get("risk_alerts", [])
+        meta = {"run_id": data.get("run_id",""), "latency_ms": data.get("latency_ms",0), "version": data.get("version","")}
+
+        with st.chat_message("assistant"):
+            risk_used = (data.get("advice") or {}).get("summary","").split("your ",1)[-1].split(" risk band",1)[0] if (data.get("advice") or {}).get("summary") else "—"
+            st.caption(f"Server-used profile — Risk: {risk_used}, Band: {int(band.get('min_eq',0)*100)}–{int(band.get('max_eq',0)*100)}% equities")
+
+            st.markdown("**Recommendation Summary**")
+            st.write(advice.get("summary", "No summary available."))
+            st.markdown(f"**Action:** {advice.get('one_action','')}")
+            st.caption(advice.get("disclaimer",""))
+
+            st.markdown("---")
+            st.markdown("**Allocation and Key Performance Indicators**")
+            col1, col2 = st.columns([2,1], gap="large")
+
+            with col1:
+                if allocation:
+                    allocation_pie(allocation)
+                    st.caption(f"Risk Band: Equities {band.get('min_eq',0)*100:.0f}–{band.get('max_eq',0)*100:.0f}%")
+                    amt = st.session_state.amount_gbp_override
+                    if isinstance(amt, (int, float)):
+                        st.markdown("**Investment breakdown (GBP)**")
+                        brk = amount_breakdown_gbp(amt, allocation)
+                        st.table(brk)
+                    pct_int = st.session_state.percent_intent
+                    if isinstance(pct_int, (int, float)):
+                        st.info(f"Noted savings intent: {pct_int:.1f}% (provide base salary/amount to calculate contributions).")
+                else:
+                    st.info("No allocation data available.")
+
+            with col2:
+                st.metric("Expected 1Y Return", f"{kpis.get('exp_return_1y',0)*100:.1f}%")
+                st.metric("Volatility (Ann.)", f"{kpis.get('exp_vol_1y',0)*100:.1f}%")
+                st.metric("Max Drawdown", f"{kpis.get('max_drawdown',0)*100:.1f}%")
+
+            st.markdown("**Risk Alerts**")
+            if alerts:
+                for a in alerts:
+                    alert_box(a)
+            else:
+                st.info("No current risk alerts detected.")
+
+            with st.expander("Advanced Response"):
+                st.markdown("**Request payload**")
+                st.json(payload)
+                st.markdown("**Response**")
+                st.json(data)
+
+            st.caption(f"Run ID: `{meta['run_id']}` | Latency: {meta['latency_ms']} ms | Version: {meta['version']}")
+            summary_text = f"{advice.get('summary','(no summary)')}
+
+Action: {advice.get('one_action','—')}"
+            st.session_state.messages.append({"role": "assistant", "content": summary_text})
+            st.rerun()

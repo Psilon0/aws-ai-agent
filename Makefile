@@ -1,22 +1,6 @@
-.PHONY: setup lint test deploy run-cli run-ui
+.PHONY: dev smoke
+dev:
+\tuvicorn src.api.app:app --reload --port 8000
 
-setup:
-	python -m venv .venv && . .venv/bin/activate && pip install -r requirements.txt
-
-lint:
-	python -m pyflakes src || true
-
-test:
-	pytest -q
-
-deploy:
-	./scripts/deploy.sh
-
-run-cli:
-	python -m scripts.chat_cli
-
-run-ui:
-	PYTHONPATH=. streamlit run apps/chat_ui_streamlit.py
-
-run-allocation-chat:
-	PYTHONPATH=. python scripts/run_allocation_chat.py
+smoke:
+\tpython - <<'PY'\nimport json,urllib.request\nbase='http://127.0.0.1:8000'\nprint('health:',urllib.request.urlopen(base+'/health').read().decode())\nreq=urllib.request.Request(base+'/chat',data=json.dumps({'message':'hello'}).encode(),headers={'content-type':'application/json'})\nprint('chat:',urllib.request.urlopen(req).read().decode())\nPY

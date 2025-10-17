@@ -1,0 +1,313 @@
+from src.model_impl.stub_model import StubModel
+import json, os, time, hashlib
+from datetime import datetime
+from zoneinfo import ZoneInfo
+
+from fastapi import FastAPI, HTTPException
+import time
+import os
+from fastapi.responses import RedirectResponse
+from pydantic import BaseModel, Field, validator, ConfigDict
+import uuid
+
+from src.model_interface.loader import load_model
+from src.model_interface.types import ModelOutput
+from src.constants.risk_bands import RISK_BANDS
+
+import re
+
+def parse_overrides(text: str) -> dict:
+    text_l = text.lower()
+    out = {}
+    m_age = re.search(r'(?:^|\D)(1[6-9]|[2-9]\d|100)\s*year(?:s)?\s*old\b', text_l)
+    if m_age: out["age"] = int(m_age.group(1))
+    if re.search(r'\b(high\s*risk|aggressive)\b', text_l): out["risk"] = "aggressive"
+    elif re.search(r'\b(moderate|balanced)\b', text_l): out["risk"] = "moderate"
+    elif re.search(r'\b(low\s*risk|conservative|defensive|safe)\b', text_l): out["risk"] = "conservative"
+    m_h = re.search(r'\b(1|[2-3]?\d)\s*(?:y|yr|yrs|year|years)\b', text_l)
+    if m_h: out["horizon_years"] = int(m_h.group(1))
+    return out
+
+from src.tools.risk_alerts import calc_alerts
+
+VERSION = (open("VERSION").read().strip() if os.path.exists("VERSION") else "0.1.0")
+TZ = ZoneInfo("Europe/London")
+
+app = FastAPI(
+    title="aws-ai-agent local API",
+    version=VERSION,
+    description="Local API for portfolio recommendations. DEMO_MODE defaults to true.",
+)
+
+START = time.time()
+
+# ─────────────────────────────────────────────────────────────
+# Pydantic models (request/response) for rich OpenAPI docs
+# ─────────────────────────────────────────────────────────────
+class ProfileIn(BaseModel):
+    age: int | None = None
+    risk: str | None = None
+    horizon_years: int | None = None
+
+class ChatIn(BaseModel):
+    message: str = Field(..., min_length=1, examples=["I'm 25, moderate risk, 5-year horizon"])
+    profile: ProfileIn | None = None
+    demo_seed: int | None = None
+    force_high_vol: bool | None = False
+    model_config = ConfigDict(json_schema_extra={
+        "examples": [{
+            "message": "I'm 25, moderate risk, 5-year horizon",
+            "profile": {"age": 25, "risk": "moderate", "horizon_years": 5},
+            "demo_seed": 42
+        }]
+    })
+
+    @validator("message")
+    def strip_msg(cls, v): return v.strip()
+
+class Advice(BaseModel):
+    summary: str
+    one_action: str
+    disclaimer: str
+
+class Allocation(BaseModel):
+    equities: float
+    bonds: float
+    cash: float
+
+class Band(BaseModel):
+    min_eq: float
+    max_eq: float
+
+class AllocationMeta(BaseModel):
+    band: Band
+
+class KPIs(BaseModel):
+    exp_return_1y: float
+    exp_vol_1y: float
+    max_drawdown: float
+
+class Sentiment(BaseModel):
+    label: str
+    confidence: float
+    asof_iso: str
+
+class AdvancedPayload(BaseModel):
+    seed: int | None = None
+    defaults_used: bool
+    prompt_sha256: str
+    llm_timed_out: bool | None = None
+
+class ChatOut(BaseModel):
+    version: str
+    run_id: str
+    latency_ms: int
+    advice: Advice
+    allocation: Allocation
+    allocation_meta: AllocationMeta
+    kpis: KPIs
+    sentiment: Sentiment
+    risk_alerts: list[dict] = []
+    advanced_payload: AdvancedPayload
+    model_config = ConfigDict(json_schema_extra={
+        "example": {
+            "version": "0.1.0",
+            "run_id": "01JB8ZP3H6Z2G4QW3K7XJ2VJ1P",
+            "latency_ms": 412,
+            "advice": {
+                "summary": "Given neutral sentiment (0.55) and your moderate risk band, we hold 50.5% equities to balance return vs. risk.",
+                "one_action": "Rebalance to target mix and set a 12-month check-in.",
+                "disclaimer": "Educational only, not financial advice."
+            },
+            "allocation": {"equities": 0.505, "bonds": 0.346, "cash": 0.149},
+            "allocation_meta": {"band": {"min_eq": 0.45, "max_eq": 0.65}},
+            "kpis": {"exp_return_1y": 0.0437, "exp_vol_1y": 0.1117, "max_drawdown": -0.0893},
+            "sentiment": {"label": "neutral", "confidence": 0.55, "asof_iso": "2025-10-17T09:00:00+01:00"},
+            "risk_alerts": [],
+            "advanced_payload": {
+                "seed": 42,
+                "defaults_used": True,
+                "prompt_sha256": "e3b0c44298fc1c149afbf4c8996fb924...",
+                "llm_timed_out": False
+            }
+        }
+    })
+
+class HealthOut(BaseModel):
+    status: str
+    version: str
+    uptime_s: int
+    tz: str
+    has_today_sentiment: bool
+
+# ─────────────────────────────────────────────────────────────
+# helpers
+# ─────────────────────────────────────────────────────────────
+def now_iso():
+    return datetime.now(TZ).isoformat(timespec="seconds")
+
+def get_sentiment():
+    d = datetime.now(TZ).strftime("%Y-%m-%d")
+    f = os.path.join("runs","sentiment", f"{d}_Europe-London.json")
+    if os.path.exists(f):
+        with open(f) as fh:
+            s = json.load(fh)
+            return {"label": s["label"], "confidence": float(s.get("confidence", 0.55)), "asof_iso": s.get("asof_iso", now_iso())}
+    return {"label":"neutral","confidence":0.55,"asof_iso": now_iso()}
+
+def safe_defaults(p: ProfileIn|None):
+    age = (p.age if p and p.age is not None else 30)
+    horizon = (p.horizon_years if p and p.horizon_years is not None else 5)
+    risk = (p.risk if p and p.risk in {"conservative","moderate","aggressive"} else "moderate")
+    age = min(max(age,16),100)
+    horizon = min(max(horizon,1),40)
+    return {"age": age, "risk": risk, "horizon_years": horizon}
+
+def explain_line(sentiment_label, conf, risk, eq):
+    return (f"Given {sentiment_label} sentiment ({conf:.2f}) and your {risk} risk band, "
+            f"the portfolio holds {eq*100:.1f}% equities to balance return vs. risk.")
+
+# ─────────────────────────────────────────────────────────────
+# routes (typed with response_model for rich OpenAPI)
+# ─────────────────────────────────────────────────────────────
+@app.get("/health", response_model=HealthOut, tags=["default"], summary="Health")
+def health():
+    d = datetime.now(TZ).strftime("%Y-%m-%d")
+    sentiment_file = os.path.exists(os.path.join("runs","sentiment", f"{d}_Europe-London.json"))
+    return HealthOut(
+        status="ok",
+        version=VERSION,
+        uptime_s=int(time.time()-START),
+        tz="Europe/London",
+        has_today_sentiment=sentiment_file
+    )
+
+
+@app.post("/chat")
+def chat(body: ChatIn):
+    t0 = time.time()
+    run_id = uuid.uuid4().hex
+
+    # --- merge profile from message + explicit profile then apply safe defaults
+    overrides = parse_overrides(getattr(body, "message", "") or "")
+    prof_in = body.profile or {}
+    merged = {
+        "age": prof_in.get("age"),
+        "risk": prof_in.get("risk"),
+        "horizon_years": prof_in.get("horizon_years"),
+    }
+    for k in ("age","risk","horizon_years"):
+        if k in overrides:
+            merged[k] = overrides[k]
+
+    # apply safe defaults using existing helper
+    profile = safe_defaults(type("P", (), merged)())
+
+    # --- load sentiment cache (Europe/London)
+    tz = ZoneInfo("Europe/London")
+    today = datetime.now(tz).strftime("%Y-%m-%d")
+    sent_path = os.path.join("runs","sentiment", f"{today}_Europe-London.json")
+    if os.path.exists(sent_path):
+        try:
+            with open(sent_path) as fh:
+                s = json.load(fh)
+            sentiment = {
+                "label": s.get("label", "neutral"),
+                "confidence": float(s.get("confidence", 0.55)),
+                "asof_iso": s.get("asof_iso", datetime.now(tz).isoformat(timespec="seconds")),
+            }
+        except Exception:
+            sentiment = {"label":"neutral","confidence":0.55,"asof_iso": datetime.now(tz).isoformat(timespec="seconds")}
+    else:
+        sentiment = {"label":"neutral","confidence":0.55,"asof_iso": datetime.now(tz).isoformat(timespec="seconds")}
+
+    # --- choose band
+    risk_key = None  # will be computed below after normalizing profile
+    band = RISK_BANDS[risk_key]
+
+    # --- call model
+    market = {"sentiment_label": sentiment["label"], "sentiment_confidence": sentiment["confidence"],
+              "tz": "Europe/London", "asof_iso": sentiment["asof_iso"]}
+    # normalize profile access (dict OR object)
+risk_val = profile.get("risk") if isinstance(profile, dict) else getattr(profile, "risk", None)
+age_val  = profile.get("age") if isinstance(profile, dict) else getattr(profile, "age", None)
+hz_val   = profile.get("horizon_years") if isinstance(profile, dict) else getattr(profile, "horizon_years", None)
+
+# defaults safety (in case safe_defaults returns None)
+if risk_val in {None, "balanced"}:
+    risk_val = "moderate"
+risk_key = risk_val
+if age_val is None:
+    age_val = 30
+if hz_val is None:
+    hz_val = 5
+
+model = StubModel()
+out = model.recommend(
+    {"age": age_val, "risk": risk_key, "horizon_years": hz_val},
+    band,
+    market,
+    seed=getattr(body, "demo_seed", None),
+)
+)
+
+    # --- allocation + kpis with guards
+    alloc_in = out.get("allocation") or {}
+    missing = [k for k in ("equities","bonds","cash") if k not in alloc_in]
+    if missing:
+        raise HTTPException(status_code=400, detail=f"model allocation missing keys: {missing}")
+    try:
+        allocation = {k: float(alloc_in[k]) for k in ("equities","bonds","cash")}
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"invalid allocation types: {e}")
+
+    k_in = out.get("kpis") or {}
+    kpis = {
+        "exp_return_1y": float(k_in.get("exp_return_1y", 0.0)),
+        "exp_vol_1y": float(k_in.get("exp_vol_1y", 0.0)),
+        "max_drawdown": float(k_in.get("max_drawdown", 0.0)),
+    }
+
+    # --- alerts
+    force_high = bool(getattr(body, "force_high_vol", False))
+    try:
+        risk_alerts = calc_alerts(kpis, sentiment, force_high_vol=force_high)
+    except TypeError:
+        # older calc_alerts signature
+        risk_alerts = calc_alerts(kpis, sentiment)
+
+    # --- advice text (concise)
+    summary = f"Given {sentiment['label']} sentiment ({sentiment['confidence']:.2f}) and your {risk_key} risk band, the portfolio holds {allocation['equities']*100:.1f}% equities to balance return vs. risk."
+    one_action = "Rebalance to target mix and set a 12-month check-in."
+    disclaimer = "Educational only, not financial advice."
+
+    latency_ms = int((time.time() - t0) * 1000)
+
+    resp = ChatOut(
+        version="0.1.0",
+        run_id=run_id,
+        latency_ms=latency_ms,
+        advice=AdviceOut(summary=summary, one_action=one_action, disclaimer=disclaimer),
+        allocation=allocation,
+        allocation_meta={"band": {"min_eq": band["min_eq"], "max_eq": band["max_eq"]}},
+        kpis=kpis,
+        sentiment=sentiment,
+        risk_alerts=risk_alerts,
+        advanced_payload=AdvancedPayload(
+            seed=getattr(body, "demo_seed", None),
+            defaults_used=(body.profile is None),
+            prompt_sha256=hash_prompt(body.message or ""),
+            llm_timed_out=False
+        ),
+    )
+
+    # persist output
+    os.makedirs("runs/outputs", exist_ok=True)
+    with open(os.path.join("runs","outputs", f"{run_id}.json"), "w") as fh:
+        json.dump(jsonable_encoder(resp), fh, indent=2)
+
+    return resp
+
+@app.get("/", include_in_schema=False)
+def root_redirect():
+    return RedirectResponse(url="/docs")
