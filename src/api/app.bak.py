@@ -3,7 +3,6 @@
 #          KPIs, sentiment, and risk alerts.
 # CONTEXT: Coursework backend service used by the Streamlit UI and CLI.
 # CREDITS: Original work — no known external code reuse.
-# NOTE: Behaviour unchanged. Added comments/docstrings to explain intent and flow.
 
 from __future__ import annotations
 
