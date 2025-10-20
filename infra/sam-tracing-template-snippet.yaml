@@ -1,0 +1,7 @@
+# Merge this into your SAM/Serverless template for your Lambda function:
+# Properties:
+#   Tracing: Active
+#   Environment:
+#     Variables:
+#       USE_XRAY: "1"
+#       XRAY_SERVICE_NAME: "FinSense"

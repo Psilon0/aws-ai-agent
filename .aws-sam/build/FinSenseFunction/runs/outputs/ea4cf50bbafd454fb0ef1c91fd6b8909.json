@@ -1,0 +1,45 @@
+{
+  "version": "0.1.0",
+  "run_id": "ea4cf50bbafd454fb0ef1c91fd6b8909",
+  "latency_ms": 1,
+  "advice": {
+    "summary": "Given neutral sentiment (0.55) and your aggressive risk band, the portfolio holds 75.0% equities to balance return vs. risk.",
+    "one_action": "Rebalance to target mix and set a 12-month check-in.",
+    "disclaimer": "Educational only, not financial advice."
+  },
+  "allocation": {
+    "equities": 0.75,
+    "bonds": 0.175,
+    "cash": 0.075
+  },
+  "allocation_meta": {
+    "band": {
+      "min_eq": 0.65,
+      "max_eq": 0.85
+    }
+  },
+  "kpis": {
+    "exp_return_1y": 0.0517,
+    "exp_vol_1y": 0.1455,
+    "max_drawdown": -0.1164
+  },
+  "sentiment": {
+    "label": "neutral",
+    "confidence": 0.55,
+    "asof_iso": "2025-10-17T17:00:56+01:00"
+  },
+  "risk_alerts": [
+    {
+      "type": "vol_spike",
+      "severity": "medium",
+      "evidence": "Annualised vol\u22480.15 \u2265 0.12",
+      "suggested_action": "Trim equities within your band"
+    }
+  ],
+  "advanced_payload": {
+    "seed": null,
+    "defaults_used": false,
+    "prompt_sha256": "c890965fbaa718b1b8bad00895c3ee60eb783c2ffc0256996b2e3280f0cf6c7f",
+    "llm_timed_out": false
+  }
+}

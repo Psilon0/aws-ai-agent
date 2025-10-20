@@ -1,0 +1,45 @@
+{
+  "version": "0.1.0",
+  "run_id": "003f25b429544e89a45e6038ed440bc6",
+  "latency_ms": 2,
+  "advice": {
+    "summary": "Given bearish sentiment (0.90) and your moderate risk band, the portfolio holds 50.5% equities to balance return vs. risk.",
+    "one_action": "Rebalance to target mix and set a 12-month check-in.",
+    "disclaimer": "Educational only, not financial advice."
+  },
+  "allocation": {
+    "equities": 0.505,
+    "bonds": 0.346,
+    "cash": 0.149
+  },
+  "allocation_meta": {
+    "band": {
+      "min_eq": 0.45,
+      "max_eq": 0.65
+    }
+  },
+  "kpis": {
+    "exp_return_1y": 0.0437,
+    "exp_vol_1y": 0.1117,
+    "max_drawdown": -0.0893
+  },
+  "sentiment": {
+    "label": "bearish",
+    "confidence": 0.9,
+    "asof_iso": "2025-10-17T15:23:56+01:00"
+  },
+  "risk_alerts": [
+    {
+      "type": "sentiment_flip",
+      "severity": "medium",
+      "evidence": "Sentiment neutral \u2192 bearish",
+      "suggested_action": "Rebalance to target and review stops"
+    }
+  ],
+  "advanced_payload": {
+    "seed": null,
+    "defaults_used": false,
+    "prompt_sha256": "9de6bed7965b46c54bbcf0ef856344de9b205ec31b1093ef7215e87510eeecb2",
+    "llm_timed_out": false
+  }
+}
