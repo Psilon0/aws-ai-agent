@@ -2,7 +2,6 @@
 # PURPOSE: Creates a DynamoDB table (default: 'agent_sessions') if it doesn’t already exist.
 # CONTEXT: Used to initialise AWS resources for the FinSense backend.
 # CREDITS: Original work — no external code reuse.
-# NOTE: Keeps behaviour identical. Comments added for clarity only.
 
 set -euo pipefail   # exit on error (-e), treat unset variables as errors (-u), fail on pipe errors (-o pipefail)
 
