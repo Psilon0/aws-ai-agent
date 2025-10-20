@@ -48,3 +48,15 @@ build/
 # Extra patterns detected in your repo
 .env
 __pycache__/
+.venv/
+.aws-sam/
+__pycache__/
+.ipynb_checkpoints/
+build/
+dist/
+*.pyc
+*.pyo
+*.log
+*.bak
+*.old
+*.orig
