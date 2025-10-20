@@ -1,4 +1,0 @@
-- [ ] load_schema()
-- [ ] validate_* helpers
-- [ ] simple message helpers
-- [ ] tests pass

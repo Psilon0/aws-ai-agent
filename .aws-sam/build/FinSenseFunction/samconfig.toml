@@ -1,8 +1,0 @@
-version = 0.1
-
-[default.deploy.parameters]
-stack_name = "finsense-stack"
-region = "eu-west-2"
-capabilities = "CAPABILITY_IAM"
-resolve_s3 = true
-parameter_overrides = "DdbTableName=agent_sessions Env=dev LogLevel=INFO"
