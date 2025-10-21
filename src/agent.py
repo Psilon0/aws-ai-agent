@@ -1,5 +1,11 @@
 """
 Agent core logic: interprets user input, plans actions, calls tools if needed.
+
+PURPOSE: High-level controller that decides whether to invoke a tool or run the
+         portfolio pipeline, and records a lightweight trace.
+CONTEXT: Used by both CLI and API backends in FinSense.
+CREDITS: Original work — no external code reuse.
+NOTE: Behaviour unchanged; comments/docstrings only.
 """
 
 import json
@@ -16,17 +22,30 @@ class Agent:
     """High-level controller for FinSense Agent."""
 
     def __init__(self):
+        # In-memory trace of key planning/execution steps for debugging or audits.
         self.trace = []
 
     def handle(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         """
         Main entry point. Handles user or system payloads and dispatches to tools or pipeline.
+
+        parameters:
+        - payload: dict – can include 'fetch_url' to force an http tool call, or a normal
+          request expected by the pipeline.
+
+        returns:
+        - dict – structured result. On tool calls, includes 'tool_result'; otherwise returns
+          the pipeline's output shape (advice, allocation, etc.). Always includes 'trace'.
+
+        notes:
+        - If a 'session_id' is present (or provided via env), a short trace is persisted
+          via the state manager. Persistence failures never block the main flow.
         """
         try:
             plan = self._plan(payload)
             self.trace.append(plan)
 
-            # --- Optional persistence: attach to session if provided ---
+            # Optional persistence: attach planning step to a session, if provided.
             session_id = (payload.get("session_id") if isinstance(payload, dict) else None) or os.getenv("SESSION_ID")
             if session_id:
                 try:
@@ -34,10 +53,10 @@ class Agent:
                         sm.init_session(session_id, meta={"created_by": "Agent"})
                     sm.append_trace(session_id, {"event": "plan", "data": plan})
                 except Exception:
-                    # Don't block the main flow on persistence issues
+                    # Never fail the user request because session storage had an issue.
                     pass
 
-            # --- Tool execution branch ---
+            # Tool execution branch: when the planner requests a tool.
             if plan.get("tool_call"):
                 tool_name = plan.get("tool")
                 args = plan.get("args", {})
@@ -56,7 +75,7 @@ class Agent:
                         pass
                 return out
 
-            # --- Default: delegate to pipeline ---
+            # Default: delegate to the simulation/analysis pipeline.
             from src.pipeline import run_pipeline
             agent_output = run_pipeline(payload)
             agent_output["trace"] = self.trace
@@ -68,6 +87,7 @@ class Agent:
             return agent_output
 
         except Exception as e:
+            # Return a structured error with a short, user-facing message and a compact traceback.
             tb = traceback.format_exc(limit=2)
             return {
                 "status": "error",
@@ -75,14 +95,16 @@ class Agent:
                 "trace": self.trace,
             }
 
-    # ---------------------------------------------------------------------- #
-    # Planning phase (stub: in reality this might call an LLM)
-    # ---------------------------------------------------------------------- #
     def _plan(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         """
-        Basic rule-based planner stub:
-        - If payload includes 'fetch_url', call http_tool
-        - Otherwise, send to simulation pipeline
+        Very simple, rule-based planner (stub).
+
+        rules:
+        - If the payload contains 'fetch_url', call the HTTP tool.
+        - Otherwise, proceed to the pipeline.
+
+        returns:
+        - dict – e.g., {"tool": "...", "tool_call": True, "args": {...}} or {"tool_call": False, "next": "pipeline"}.
         """
         if isinstance(payload, dict) and "fetch_url" in payload:
             return {
@@ -92,11 +114,20 @@ class Agent:
             }
         return {"tool_call": False, "next": "pipeline"}
 
-    # ---------------------------------------------------------------------- #
-    # Tool execution layer
-    # ---------------------------------------------------------------------- #
     def _execute_tool(self, name: str, args: Dict[str, Any]):
-        """Route to the correct tool and execute it safely."""
+        """
+        Route to the correct tool and execute it safely.
+
+        parameters:
+        - name: str – registered tool name (e.g., 'http_tool', 'analytics_stub', 's3_tool', 'dynamodb_tool').
+        - args: dict – keyword arguments passed directly to the tool.
+
+        returns:
+        - Any – whatever the tool returns (often a dict or primitive).
+
+        raises:
+        - RuntimeError – wraps any underlying error with the tool name for easier debugging.
+        """
         try:
             if name == "http_tool":
                 url = args.get("url")
@@ -115,4 +146,5 @@ class Agent:
                 raise ValueError(f"Unknown tool: {name}")
 
         except Exception as e:
+            # Provide context about which tool failed; keep original exception as cause.
             raise RuntimeError(f"Tool '{name}' failed: {e}") from e
