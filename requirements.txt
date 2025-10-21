@@ -7,3 +7,4 @@ aws-xray-sdk>=2.14.0
 # If you truly need FastAPI+Mangum in Lambda, add them back; otherwise keep lean
 # fastapi==0.119.0
 # mangum==0.19.0
+numpy>=1.26.0
