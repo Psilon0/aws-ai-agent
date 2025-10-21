@@ -2,9 +2,9 @@ import json, time
 import streamlit as st
 from src.pipeline import run_pipeline
 
-st.set_page_config(page_title="FinSense – Demo", page_icon="💹", layout="centered")
+st.set_page_config(page_title="FinSense – Demo", layout="centered")
 
-st.title("FinSense 💹")
+st.title("FinSense")
 st.caption("Autonomous portfolio insights (demo) – not financial advice.")
 st.divider()
 
