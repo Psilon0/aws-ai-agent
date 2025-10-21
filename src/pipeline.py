@@ -1,205 +1,118 @@
-"""
-Pipeline for FinSense — runs the simulation + formats advice.
+from __future__ import annotations
+import json, time, uuid
+from datetime import datetime
+from zoneinfo import ZoneInfo
+from jsonschema import validate
 
-PURPOSE:
-- Validate a simulation request, run the deterministic simulator, validate its output,
-  generate a concise advisory summary, and package everything into a stable AgentOutput.
+from src.constants.risk_bands import RISK_BANDS
+from src.tools import analytics_stub
 
-CONTEXT:
-- Called by the Agent when portfolio analytics are requested. Keeps responses deterministic
-  and schema-compliant for coursework marking and reproducibility.
+TZ = ZoneInfo("Europe/London")
 
-CREDITS:
-- Original work — no external code reuse.
-NOTE:
-- Behaviour unchanged; comments/docstrings only.
-"""
+# --- Safe import for risk alerts, with a no-op fallback ---
+try:
+    from src.tools.risk_alerts import risk_alerts_from_kpis
+except Exception:
+    def risk_alerts_from_kpis(allocation: dict, kpis: dict):
+        return []
 
-import json
-import time
-import uuid
-import os
-from typing import Dict, Any
-from jsonschema import validate, ValidationError
-from src import tools
+def _uuid_v7_like() -> str:
+    # Simple readable run id
+    return uuid.uuid4().hex[:8] + "-" + datetime.now(TZ).strftime("%Y%m%d%H%M%S")
 
+def _load_schema(path: str) -> dict:
+    import pathlib
+    p = pathlib.Path("schemas") / path
+    with open(p, "r") as f:
+        return json.load(f)
 
-def run_pipeline(payload: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Main orchestrator for simulation and explanation.
+# Schemas (must exist in ./schemas/)
+SIM_REQ_SCHEMA = _load_schema("sim_request.schema.json")
+AGENT_OUT_SCHEMA = _load_schema("agent_output.schema.json")
 
-    steps:
-    1) Validate input against the sim_request schema.
-    2) Run the deterministic simulator (no Bedrock here).
-    3) Validate the simulator's output against its schema.
-    4) Generate short advice text (optionally via Bedrock if enabled).
-    5) Package a final AgentOutput with run_id and latency.
+def _clamp(x: float, lo: float, hi: float) -> float:
+    return max(lo, min(hi, x))
 
-    parameters:
-    - payload: dict – expected to match schemas/sim_request.schema.json.
-
-    returns:
-    - dict – AgentOutput-style response including advice, allocation, KPIs, and latency.
-             On validation or runtime errors, returns a minimal {"status":"error", "messages":[...]}.
-    """
-    start = time.time()
-
-    # 1) Validate input against sim_request schema
-    from src.agent_io import load_schema
-    try:
-        sim_request_schema = load_schema("schemas/sim_request.schema.json")
-        validate(payload, sim_request_schema)
-    except (FileNotFoundError, ValidationError) as e:
-        return {"status": "error", "messages": [f"Invalid sim request: {e}"]}
-
-    # 2) Run the deterministic simulator (always runs; no Bedrock here)
-    try:
-        sim_result = tools.analytics_stub.run_simulation(payload)
-    except Exception as e:
-        return {"status": "error", "messages": [f"Simulation failed: {e}"]}
-
-    # 3) Validate simulator output
-    try:
-        sim_result_schema = load_schema("schemas/sim_result.schema.json")
-        validate(sim_result, sim_result_schema)
-    except (FileNotFoundError, ValidationError) as e:
-        return {"status": "error", "messages": [f"Simulator output invalid: {e}"]}
-
-    # 4) Generate advice text (Bedrock optional; respects USE_BEDROCK=0)
-    advice_text = _explain_result(sim_result)
-    advice_text = _cap_words(advice_text, max_words=180)
-
-    # 5) Package final AgentOutput
-    run_id = str(uuid.uuid4())
-    latency_ms = round((time.time() - start) * 1000, 1)
-
-    allocation = sim_result.get("proposed_allocation") or sim_result.get("allocation")
-    kpis = sim_result.get("kpis")
-
-    agent_output = {
-        "status": "ok",
-        "run_id": run_id,
-        "messages": [{"role": "assistant", "content": advice_text}],
-        "analytics": sim_result,
-        "allocation": allocation,
-        "kpis": kpis,
-        "advice": {
-            "summary": advice_text,
-            "one_action": "Review your allocation and adjust if goals change.",
-            "disclaimer": "Educational only, not financial advice."
-        },
-        "latency_ms": latency_ms,
+def _apply_sentiment_tilt(allocation: dict, risk_band: dict, sentiment: dict | None) -> dict:
+    """Tilt equities within band by ±5% scaled by confidence; adjust bonds to keep cash steady."""
+    if not sentiment:
+        return allocation
+    label = sentiment.get("label", "neutral")
+    conf = float(sentiment.get("confidence", 0.5))
+    tilt_map = {
+        "bullish": +0.05,
+        "slightly_bullish": +0.025,
+        "neutral": 0.0,
+        "slightly_bearish": -0.025,
+        "bearish": -0.05,
     }
+    delta = tilt_map.get(label, 0.0) * conf
+    eq = _clamp(allocation["equities"] + delta, risk_band["min_eq"], risk_band["max_eq"])
+    # Keep cash constant; give/take from bonds
+    cash = allocation["cash"]
+    bonds = max(0.0, 1.0 - eq - cash)
+    # Round to 3dp and ensure sum=1.000 via cash
+    eq = round(eq, 3)
+    bonds = round(bonds, 3)
+    cash = round(1.0 - round(eq + bonds, 3), 3)
+    return {"equities": eq, "bonds": bonds, "cash": cash}
 
-    # Validate final shape if schema exists; errors become a schema-valid "error" response.
+def _local_advice(proposed_alloc: dict, kpis: dict, risk_profile: str) -> dict:
+    eq = int(round(proposed_alloc["equities"] * 100))
+    bd = int(round(proposed_alloc["bonds"] * 100))
+    cs = int(round(proposed_alloc["cash"] * 100))
+    er = round(kpis["exp_return_1y"] * 100, 1)
+    ev = round(kpis["exp_vol_1y"] * 100, 1)
+    summary = (
+        f"For a {risk_profile} profile, target ~{eq}% equities, {bd}% bonds, and {cs}% cash. "
+        f"Our 1-year simulation implies ~{er}% expected return with ~{ev}% volatility. "
+        f"Consider periodic rebalancing to stay within your risk band."
+    )
+    one_action = "Rebalance to the target mix within the next week."
+    disclaimer = "Educational only; not financial advice."
+    return {"summary": summary[:1800], "one_action": one_action, "disclaimer": disclaimer}
+
+def run_pipeline(payload: dict) -> dict:
+    t0 = time.time()
+
+    # 1) Validate input
+    validate(payload, SIM_REQ_SCHEMA)
+
+    rp = payload["risk_profile"].lower()
+    bands = RISK_BANDS[rp]
+
+    # 2) Deterministic sim via adapter (calls ProperModel)
+    sim = analytics_stub.run_simulation(payload)
+    proposed = sim["proposed_allocation"]
+    kpis = sim["kpis"]
+
+    # 3) Sentiment tilt within band
+    proposed = _apply_sentiment_tilt(proposed, bands, payload.get("sentiment"))
+
+    # 4) Risk alerts (no-op fallback if module missing)
     try:
-        agent_schema = load_schema("schemas/agent_output.schema.json")
-        validate(agent_output, agent_schema)
-    except FileNotFoundError:
-        pass
-    except ValidationError as e:
-        return {
-            "status": "error",
-            "messages": [f"AgentOutput failed schema validation: {e.message}"],
-            "analytics": sim_result,
-            "latency_ms": latency_ms,
-        }
-
-    return agent_output
-
-
-def _cap_words(text: str, max_words: int) -> str:
-    """
-    Hard-cap a piece of text at a maximum number of words.
-
-    parameters:
-    - text: str – input paragraph/string.
-    - max_words: int – limit to enforce.
-
-    returns:
-    - str – trimmed string (adds "…" if truncated). Returns empty string for non-strings.
-    """
-    if not isinstance(text, str):
-        return ""
-    words = text.split()
-    if len(words) <= max_words:
-        return text.strip()
-    return " ".join(words[:max_words]).rstrip() + "…"
-
-
-def _converse(prompt_text: str) -> str:
-    """
-    Optionally call Bedrock to generate explanatory text; otherwise return a stub.
-
-    behaviour:
-    - If USE_BEDROCK is "0" (default), return a fixed local explanation.
-    - If enabled, call src.tools.bedrock_client.converse(prompt_text) and
-      try to coerce the result to a string in a tolerant way.
-    - Never raises; always returns fallback text on errors.
-
-    parameters:
-    - prompt_text: str – the full prompt built from the explainer template + sim result.
-
-    returns:
-    - str – human-readable explanation of the simulated portfolio outcome.
-    """
-    if os.getenv("USE_BEDROCK", "0") == "0":
-        return ("Based on the simulated data, this allocation targets balanced growth with "
-                "moderate volatility. Rebalance periodically and keep a small cash buffer.")
-
-    try:
-        from src.tools import bedrock_client
-        resp = bedrock_client.converse(prompt_text)
-        if isinstance(resp, str):
-            return resp
-        if isinstance(resp, dict):
-            msgs = resp.get("messages") or []
-            if msgs and isinstance(msgs[0], dict):
-                return msgs[0].get("content") or "No response text."
-            return resp.get("output") or resp.get("content") or "No response text."
-        return str(resp)
+        alerts = risk_alerts_from_kpis(proposed, kpis)
     except Exception:
-        return ("Based on the simulated data, your portfolio appears balanced for a moderate "
-                "risk profile. Consider periodic rebalancing and a small cash buffer.")
+        alerts = []
 
+    # 5) Advice (local generator; no Bedrock dependency)
+    advice = _local_advice(proposed, kpis, rp)
 
-def _make_sim_request(risk_profile: str, horizon_years: int, seed: int = 42) -> Dict[str, Any]:
-    """
-    Build a minimal sim request payload.
-
-    parameters:
-    - risk_profile: str – e.g., 'conservative' | 'balanced' | 'aggressive'
-    - horizon_years: int – 1..40
-    - seed: int – deterministic demo seed (default 42)
-
-    returns:
-    - dict – structure compatible with run_simulation().
-    """
-    # Kept for compatibility if used elsewhere
-    return {
-        "risk_profile": risk_profile,
-        "horizon_years": horizon_years,
-        "context": {"demo_seed": seed}
+    # 6) Assemble result
+    out = {
+        "advice": advice,
+        "analytics": {"proposed_allocation": proposed},
+        "kpis": kpis,
+        "sentiment": payload.get("sentiment") or {"label": "neutral", "confidence": 0.5},
+        "risk_alerts": alerts,
+        "run_id": _uuid_v7_like(),
+        "latency_ms": int((time.time() - t0) * 1000),
     }
 
+    # 7) Validate output
+    validate(out, AGENT_OUT_SCHEMA)
+    return out
 
-def _explain_result(sim_result: Dict[str, Any]) -> str:
-    """
-    Build the explainer prompt (from file if available), attach the simulation JSON,
-    and obtain a concise natural-language explanation (via Bedrock or local stub).
-
-    parameters:
-    - sim_result: dict – the simulator's output.
-
-    returns:
-    - str – explanatory paragraph intended for end users.
-    """
-    try:
-        with open("src/prompts/final_explainer_prompt.md", "r") as f:
-            base_prompt = f.read()
-    except FileNotFoundError:
-        base_prompt = "Summarise the portfolio outlook clearly and concisely for a general audience."
-
-    result_text = json.dumps(sim_result, indent=2, sort_keys=True)
-    full_prompt = f"{base_prompt}\n\nSimulation result JSON:\n{result_text}"
-    return _converse(full_prompt)
+if __name__ == "__main__":
+    demo = {"risk_profile": "moderate", "horizon_years": 5, "age": 30, "context": {"demo_seed": 123}}
+    print(json.dumps(run_pipeline(demo), indent=2))
