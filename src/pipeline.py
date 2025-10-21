@@ -1,5 +1,18 @@
 """
 Pipeline for FinSense — runs the simulation + formats advice.
+
+PURPOSE:
+- Validate a simulation request, run the deterministic simulator, validate its output,
+  generate a concise advisory summary, and package everything into a stable AgentOutput.
+
+CONTEXT:
+- Called by the Agent when portfolio analytics are requested. Keeps responses deterministic
+  and schema-compliant for coursework marking and reproducibility.
+
+CREDITS:
+- Original work — no external code reuse.
+NOTE:
+- Behaviour unchanged; comments/docstrings only.
 """
 
 import json
@@ -12,7 +25,23 @@ from src import tools
 
 
 def run_pipeline(payload: Dict[str, Any]) -> Dict[str, Any]:
-    """Main orchestrator for simulation and explanation."""
+    """
+    Main orchestrator for simulation and explanation.
+
+    steps:
+    1) Validate input against the sim_request schema.
+    2) Run the deterministic simulator (no Bedrock here).
+    3) Validate the simulator's output against its schema.
+    4) Generate short advice text (optionally via Bedrock if enabled).
+    5) Package a final AgentOutput with run_id and latency.
+
+    parameters:
+    - payload: dict – expected to match schemas/sim_request.schema.json.
+
+    returns:
+    - dict – AgentOutput-style response including advice, allocation, KPIs, and latency.
+             On validation or runtime errors, returns a minimal {"status":"error", "messages":[...]}.
+    """
     start = time.time()
 
     # 1) Validate input against sim_request schema
@@ -62,7 +91,7 @@ def run_pipeline(payload: Dict[str, Any]) -> Dict[str, Any]:
         "latency_ms": latency_ms,
     }
 
-    # Validate final shape if schema exists
+    # Validate final shape if schema exists; errors become a schema-valid "error" response.
     try:
         agent_schema = load_schema("schemas/agent_output.schema.json")
         validate(agent_output, agent_schema)
@@ -79,9 +108,17 @@ def run_pipeline(payload: Dict[str, Any]) -> Dict[str, Any]:
     return agent_output
 
 
-# ------------------------- helpers ----------------------------------------- #
-
 def _cap_words(text: str, max_words: int) -> str:
+    """
+    Hard-cap a piece of text at a maximum number of words.
+
+    parameters:
+    - text: str – input paragraph/string.
+    - max_words: int – limit to enforce.
+
+    returns:
+    - str – trimmed string (adds "…" if truncated). Returns empty string for non-strings.
+    """
     if not isinstance(text, str):
         return ""
     words = text.split()
@@ -92,8 +129,19 @@ def _cap_words(text: str, max_words: int) -> str:
 
 def _converse(prompt_text: str) -> str:
     """
-    Bedrock call if USE_BEDROCK != "0"; otherwise return stub text.
-    Never raise on failure; always fall back to a local message.
+    Optionally call Bedrock to generate explanatory text; otherwise return a stub.
+
+    behaviour:
+    - If USE_BEDROCK is "0" (default), return a fixed local explanation.
+    - If enabled, call src.tools.bedrock_client.converse(prompt_text) and
+      try to coerce the result to a string in a tolerant way.
+    - Never raises; always returns fallback text on errors.
+
+    parameters:
+    - prompt_text: str – the full prompt built from the explainer template + sim result.
+
+    returns:
+    - str – human-readable explanation of the simulated portfolio outcome.
     """
     if os.getenv("USE_BEDROCK", "0") == "0":
         return ("Based on the simulated data, this allocation targets balanced growth with "
@@ -116,6 +164,17 @@ def _converse(prompt_text: str) -> str:
 
 
 def _make_sim_request(risk_profile: str, horizon_years: int, seed: int = 42) -> Dict[str, Any]:
+    """
+    Build a minimal sim request payload.
+
+    parameters:
+    - risk_profile: str – e.g., 'conservative' | 'balanced' | 'aggressive'
+    - horizon_years: int – 1..40
+    - seed: int – deterministic demo seed (default 42)
+
+    returns:
+    - dict – structure compatible with run_simulation().
+    """
     # Kept for compatibility if used elsewhere
     return {
         "risk_profile": risk_profile,
@@ -125,6 +184,16 @@ def _make_sim_request(risk_profile: str, horizon_years: int, seed: int = 42) -> 
 
 
 def _explain_result(sim_result: Dict[str, Any]) -> str:
+    """
+    Build the explainer prompt (from file if available), attach the simulation JSON,
+    and obtain a concise natural-language explanation (via Bedrock or local stub).
+
+    parameters:
+    - sim_result: dict – the simulator's output.
+
+    returns:
+    - str – explanatory paragraph intended for end users.
+    """
     try:
         with open("src/prompts/final_explainer_prompt.md", "r") as f:
             base_prompt = f.read()
