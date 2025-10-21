@@ -60,3 +60,7 @@ dist/
 *.bak
 *.old
 *.orig
+
+# Local bundles
+aws-ai-agent.zip
+*.zip
