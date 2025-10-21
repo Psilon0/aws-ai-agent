@@ -1,3 +1,10 @@
+# PURPOSE: Alternate pipeline that validates input, runs the deterministic simulator,
+#          applies a sentiment tilt within risk bands, generates advice locally,
+#          and validates the final output against schemas.
+# CONTEXT: Lightweight path used when you want a self-contained flow (no Bedrock dependency).
+# CREDITS: Original work — no external code reuse.
+# NOTE: Behaviour unchanged; comments/docstrings only.
+
 from __future__ import annotations
 import json, time, uuid
 from datetime import datetime
@@ -9,7 +16,8 @@ from src.tools import analytics_stub
 
 TZ = ZoneInfo("Europe/London")
 
-# --- Safe import for risk alerts, with a no-op fallback ---
+# Safe import for risk alerts with a no-op fallback.
+# If the optional alerts module isn’t available, we still return a valid structure.
 try:
     from src.tools.risk_alerts import risk_alerts_from_kpis
 except Exception:
@@ -17,10 +25,17 @@ except Exception:
         return []
 
 def _uuid_v7_like() -> str:
-    # Simple readable run id
+    """
+    Create a readable run ID using a short random prefix and a timestamp suffix.
+    Example: 'a1b2c3d4-20251021XXXXXX'
+    """
     return uuid.uuid4().hex[:8] + "-" + datetime.now(TZ).strftime("%Y%m%d%H%M%S")
 
 def _load_schema(path: str) -> dict:
+    """
+    Load a JSON schema from ./schemas/ relative to the project root.
+    Raises FileNotFoundError or JSONDecodeError if missing/invalid.
+    """
     import pathlib
     p = pathlib.Path("schemas") / path
     with open(p, "r") as f:
@@ -31,10 +46,21 @@ SIM_REQ_SCHEMA = _load_schema("sim_request.schema.json")
 AGENT_OUT_SCHEMA = _load_schema("agent_output.schema.json")
 
 def _clamp(x: float, lo: float, hi: float) -> float:
+    """Clamp a float x into [lo, hi]."""
     return max(lo, min(hi, x))
 
 def _apply_sentiment_tilt(allocation: dict, risk_band: dict, sentiment: dict | None) -> dict:
-    """Tilt equities within band by ±5% scaled by confidence; adjust bonds to keep cash steady."""
+    """
+    Tilt equities up/down by up to ±5% (scaled by sentiment confidence), but stay within band.
+
+    behaviour:
+    - Equities are moved by a delta based on {bullish..bearish} × confidence.
+    - Cash is kept constant; bonds absorb the difference so weights still sum to 1.000.
+    - Final values are rounded to 3dp, with cash set as the residual.
+
+    returns:
+    - dict – {"equities": float, "bonds": float, "cash": float}
+    """
     if not sentiment:
         return allocation
     label = sentiment.get("label", "neutral")
@@ -58,6 +84,12 @@ def _apply_sentiment_tilt(allocation: dict, risk_band: dict, sentiment: dict | N
     return {"equities": eq, "bonds": bonds, "cash": cash}
 
 def _local_advice(proposed_alloc: dict, kpis: dict, risk_profile: str) -> dict:
+    """
+    Build a concise, human-readable advice block without calling external LLMs.
+
+    returns:
+    - dict – {"summary": str, "one_action": str, "disclaimer": str}
+    """
     eq = int(round(proposed_alloc["equities"] * 100))
     bd = int(round(proposed_alloc["bonds"] * 100))
     cs = int(round(proposed_alloc["cash"] * 100))
@@ -73,6 +105,21 @@ def _local_advice(proposed_alloc: dict, kpis: dict, risk_profile: str) -> dict:
     return {"summary": summary[:1800], "one_action": one_action, "disclaimer": disclaimer}
 
 def run_pipeline(payload: dict) -> dict:
+    """
+    End-to-end pipeline:
+
+    steps:
+    1) Validate input against SIM_REQ_SCHEMA.
+    2) Run deterministic simulation (analytics_stub).
+    3) Apply sentiment tilt within risk band constraints.
+    4) Generate risk alerts (if module available).
+    5) Create local advice text (no Bedrock dependency).
+    6) Assemble output with run_id and latency.
+    7) Validate output against AGENT_OUT_SCHEMA.
+
+    returns:
+    - dict – final response object suitable for the front-end.
+    """
     t0 = time.time()
 
     # 1) Validate input
@@ -114,5 +161,6 @@ def run_pipeline(payload: dict) -> dict:
     return out
 
 if __name__ == "__main__":
+    # Quick manual run to see a formatted result in the console.
     demo = {"risk_profile": "moderate", "horizon_years": 5, "age": 30, "context": {"demo_seed": 123}}
     print(json.dumps(run_pipeline(demo), indent=2))
